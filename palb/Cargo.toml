@@ -6,7 +6,6 @@ readme = "../README.md"
 
 [dependencies]
 itertools = "0.14.0"
-mimalloc = "0.1.48"
 num-traits = "0.2.19"
 ordered-float = "5.1.0"
 rand = "0.9.2"

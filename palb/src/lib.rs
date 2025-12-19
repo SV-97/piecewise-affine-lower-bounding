@@ -13,13 +13,9 @@ mod interval;
 mod kbn_sum;
 mod subgradient;
 
-use mimalloc::MiMalloc;
 use take_until::TakeUntilExt;
 
 use crate::kbn_sum::KbnSumIteratorExt;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
 
 /// A simple wrapper around `f64` that specifies a total, and hence not IEEE754-compatible, order.
 pub type Floating = OrderedFloat<f64>;
