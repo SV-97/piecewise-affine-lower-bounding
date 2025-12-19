@@ -7,7 +7,7 @@ authors = [
     { name = "Stefan Volz", email = "volzstefan97@googlemail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["numpy"]
 
 [project.scripts]
 palb-py = "palb_py:main"
