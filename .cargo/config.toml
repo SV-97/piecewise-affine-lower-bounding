@@ -1,2 +1,2 @@
 [build]
-rustflags = ["-Ctarget-cpu=native", "-Clink-arg=-fuse-ld=mold"]
+# rustflags = ["-Ctarget-cpu=native", "-Clink-arg=-fuse-ld=mold"]
