@@ -52,10 +52,10 @@ enum ObjectiveType {
 /// Solves the continuous knapsack problem via greedy selection.
 /// In this `beta` references the transformed formulation of the problem (with variables beta in the paper).
 /// So this solves
-///
-///     min_{\beta \in [0,1]^|I_0|} sum_i beta_i * key(value_i)
-///     s.t. sum_i beta_i = capacity
-///
+/// ```text
+/// min_{\beta \in [0,1]^|I_0|} sum_i beta_i * key(value_i)
+/// s.t. sum_i beta_i = capacity
+/// ```
 /// if `objective_type == ObjectiveType::Minimize`, otherwise it solves the analogous maximization problem.
 fn solve_cont_knapsack_beta<T>(
     values: &mut [T],
@@ -117,11 +117,11 @@ fn solve_cont_knapsack_beta<T>(
 /// It returns the single calculated bound of the variable sum.
 /// In this `alpha` references the untransformed formulation of the problem (with variables alpha in the paper).
 /// So this solves
-///
-///     min_{\alpha \in [-1,1]^|I_0|} sum_i alpha_i * key(value_i)
-///     s.t. sum_i alpha_i = -B
-///     where B = |n_above| - |n_below|
-///
+/// ```text
+/// min_{\alpha \in [-1,1]^|I_0|} sum_i alpha_i * key(value_i)
+/// s.t. sum_i alpha_i = -B
+/// where B = |n_above| - |n_below|
+/// ```
 /// if `objective_type == ObjectiveType::Minimize`, otherwise it solves the analogous maximization problem.
 fn solve_cont_knapsack_alpha<T>(
     items: &mut [T], // The items for the I_0 set
@@ -473,8 +473,9 @@ impl StepsizeRule for DoubleIntervalSize {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// A supporting line to the objective function. Given in the form:
-///
-///     L(x) = grad * (x - eval_point) + obj_val
+/// ```text
+/// L(x) = grad * (x - eval_point) + obj_val
+/// ```
 ///
 struct AffineSupport {
     /// The point at which the objective function was evaluated.
