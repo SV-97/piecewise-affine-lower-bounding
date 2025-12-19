@@ -2,7 +2,6 @@
 name = "palb_py"
 version = "0.1.2"
 edition = "2021"
-readme = "../README.md"
 description = "A fast and exact method for solving least absolute deviations line problems (Affine-linear L1 regression)."
 authors = ["Stefan Volz <volzstefan97@googlemail.com>"]
 license = "MIT OR Apache-2.0"
