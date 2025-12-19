@@ -1,7 +1,7 @@
 [project]
 name = "palb-py"
 version = "0.1.2"
-description = "PALB is an exact, robust, high-performance solver for the Least-Absolute-Deviations-Line (LAD) problem, i.e. one dimensional affine linear L1 regression. This is the Python API to the core Rust implementation."
+description = "A fast and exact method for solving least absolute deviations line problems (Affine-linear L1 regression)."
 readme = "../README.md"
 authors = [
     { name = "Stefan Volz", email = "volzstefan97@googlemail.com" }

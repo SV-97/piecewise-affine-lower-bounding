@@ -3,6 +3,12 @@ name = "palb"
 version = "0.1.2"
 edition = "2024"
 readme = "../README.md"
+description = "A fast and exact method for solving least absolute deviations line problems (Affine-linear L1 regression)."
+authors = ["Stefan Volz <volzstefan97@googlemail.com>"]
+license = "MIT OR Apache-2.0"
+keywords = ["optimization", "linear-programming", "l1-regression", "mathematics"]
+categories = ["science", "mathematics", "algorithms"]
+homepage = "https://github.com/SV-97/piecewise-affine-lower-bounding/palb"
 
 [dependencies]
 itertools = "0.14.0"
