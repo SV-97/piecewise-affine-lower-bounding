@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = ["palb", "palb_py"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = true
