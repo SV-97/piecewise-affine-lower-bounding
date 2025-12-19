@@ -1,0 +1,25 @@
+[project]
+name = "palb-py"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Stefan Volz", email = "volzstefan97@googlemail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+palb-py = "palb_py:main"
+
+[tool.maturin]
+module-name = "palb_py._core"
+python-packages = ["palb_py"]
+python-source = "src"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
