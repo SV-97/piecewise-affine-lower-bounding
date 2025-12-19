@@ -471,28 +471,48 @@ impl StepsizeRule for DoubleIntervalSize {
     }
 }
 
-fn compute_intersection_stable(
-    a_slope: Floating,
-    fa: Floating,
-    sa: Floating,
-    b_slope: Floating,
-    fb: Floating,
-    sb: Floating,
-) -> Floating {
-    // midpoint of x-values
-    let m = (a_slope + b_slope) * Floating::from(0.5);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A supporting line to the objective function. Given in the form:
+///
+///     L(x) = grad * (x - eval_point) + obj_val
+///
+struct AffineSupport {
+    /// The point at which the objective function was evaluated.
+    pub eval_point: Floating,
+    /// The objective function function value at the given point.
+    pub obj_val: Floating,
+    /// The slope of the supporting line (a subgradient of the objective function at the given point).
+    pub grad: Floating,
+}
 
-    // shifted coordinates
-    let a_p = a_slope - m;
-    let b_p = b_slope - m;
+impl AffineSupport {
+    /// Computes the point of intersection of two lines in a numerically stable way.
+    ///
+    /// This works by computing the intersection of the lines in shifted coordinates and then translating it back to improve numerical stability.
+    pub fn intersect_stable(self, other: &AffineSupport) -> Floating {
+        let a = self;
+        let b = other;
+        let midpoint = (a.eval_point + b.eval_point) * Floating::from(0.5);
 
-    // intersection in shifted coords
-    let denom = sa - sb;
-    let numer = [fb, -fa, sa * a_p, -sb * b_p].into_iter().kbn_sum(); //(fb - fa) + (sa * a_p - sb * b_p);
-    let x_p = numer / denom;
+        // shifted coordinates
+        let a_shifted = a.eval_point - midpoint;
+        let b_shifted = b.eval_point - midpoint;
 
-    // shift back
-    m + x_p
+        // intersection in shifted coords
+        let denom = a.grad - b.grad;
+        let numer = [
+            b.obj_val,
+            -a.obj_val,
+            a.grad * a_shifted,
+            -b.grad * b_shifted,
+        ]
+        .into_iter()
+        .kbn_sum(); //(fb - fa) + (sa * a_shifted - sb * b_shifted);
+        let x_p = numer / denom;
+
+        // shift back
+        midpoint + x_p
+    }
 }
 
 impl<'a, Delta: StepsizeRule> PalpGen<'a, Delta> {
@@ -582,13 +602,17 @@ impl<Delta: StepsizeRule> PalpGen<'_, Delta> {
         let fb = b.get_or_compute_obj_val_cached(&self.points);
 
         let next_slope = {
-            let sa = a.subgrad.max();
-            let sb = b.subgrad.min();
-            // println!("Intersecting:");
-            // println!("    {sa} * (x - {}) + {fa}", a.slope);
-            // println!("    {sb} * (x - {}) + {fb}", b.slope);
-            // let intersection_slope = ((fb - sb * b.slope) - (fa - sa * a.slope)) / (sa - sb);
-            let intersection_slope = compute_intersection_stable(a.slope, fa, sa, b.slope, fb, sb); // ((fb - fa) + (sa * a.slope - sb * b.slope)) / (sa - sb);
+            let support_at_a = AffineSupport {
+                obj_val: fa,
+                eval_point: a.slope,
+                grad: a.subgrad.max(),
+            };
+            let support_at_b = AffineSupport {
+                obj_val: fb,
+                eval_point: b.slope,
+                grad: b.subgrad.min(),
+            };
+            let intersection_slope = support_at_a.intersect_stable(&support_at_b);
 
             // Note: we tested multiple other eps rules here (e.g. to allow steps closer to the boundary later on or stuff like that),
             // in particular also linear interpolation and smoothstep. But we found that this simple rule works best.
