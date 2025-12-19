@@ -1,3 +1,5 @@
+//! PALB is an exact, robust, high-performance solver for the Least-Absolute-Deviations-Line (LAD) problem, i.e. one dimensional affine linear L1 regression.
+//! This is the Rust core; be aware that there is also a Python API (`palb_py`).
 use std::borrow::Cow;
 
 pub use geometry::{Dual, DualLine, PrimalLine, PrimalPoint};
@@ -19,6 +21,7 @@ use crate::kbn_sum::KbnSumIteratorExt;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+/// A simple wrapper around `f64` that specifies a total, and hence not IEEE754-compatible, order.
 pub type Floating = OrderedFloat<f64>;
 
 /// The value of the objective function for a given line.
@@ -30,6 +33,7 @@ pub fn objective_value(line: PrimalLine, points: &[PrimalPoint]) -> Floating {
         .kbn_sum()
 }
 
+/// A state at one of the two interval boundaries maintained by the algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AlgState {
     pub slope: Floating,
@@ -45,6 +49,14 @@ enum ObjectiveType {
     Maximize,
 }
 
+/// Solves the continuous knapsack problem via greedy selection.
+/// In this `beta` references the transformed formulation of the problem (with variables beta in the paper).
+/// So this solves
+///
+///     min_{\beta \in [0,1]^|I_0|} sum_i beta_i * key(value_i)
+///     s.t. sum_i beta_i = capacity
+///
+/// if `objective_type == ObjectiveType::Minimize`, otherwise it solves the analogous maximization problem.
 fn solve_cont_knapsack_beta<T>(
     values: &mut [T],
     capacity: Floating,
@@ -54,7 +66,6 @@ fn solve_cont_knapsack_beta<T>(
     let n = values.len();
     let n_f = Floating::from(n as f64);
 
-    // --- Handle Preconditions and Edge Cases ---
     if capacity.is_negative() || capacity > n_f {
         panic!("Capacity must be between 0.0 and {n_f}, but got {capacity}.");
     }
@@ -72,7 +83,6 @@ fn solve_cont_knapsack_beta<T>(
     // We don't think that we'll ever encounter such a case.
     let num_full_items = capacity.floor() as usize;
 
-    // The fractional amount for the single "pivot" item.
     let fractional_part = capacity - Floating::from(num_full_items as f64);
 
     // The pivot is the item at index `num_full_items`.
@@ -91,7 +101,7 @@ fn solve_cont_knapsack_beta<T>(
 
     // `values` has now been partitioned.
     // The `num_full_items` largest values are in the slice `&values[..pivot_idx]`.
-    // These items all have beta_i = 1.0.
+    // These items all have beta_i = 1.
     let sum_full_items = values[..pivot_idx].iter().map(&mut key).kbn_sum();
 
     // The pivot item is at `values[pivot_idx]`.
@@ -105,6 +115,14 @@ fn solve_cont_knapsack_beta<T>(
 
 /// A wrapper that computes either the min or max of `sum(alpha_i * x_i)`.
 /// It returns the single calculated bound of the variable sum.
+/// In this `alpha` references the untransformed formulation of the problem (with variables alpha in the paper).
+/// So this solves
+///
+///     min_{\alpha \in [-1,1]^|I_0|} sum_i alpha_i * key(value_i)
+///     s.t. sum_i alpha_i = -B
+///     where B = |n_above| - |n_below|
+///
+/// if `objective_type == ObjectiveType::Minimize`, otherwise it solves the analogous maximization problem.
 fn solve_cont_knapsack_alpha<T>(
     items: &mut [T], // The items for the I_0 set
     n_below: u32,
@@ -201,6 +219,7 @@ fn compute_subgrad_bound<const N: usize>(
     (median_line, bounds)
 }
 
+/// Computes the partial subgradient of the objective function.
 fn partial_subgrad(
     median_value: Floating,
     lines: &mut [(DualLine, Floating)],
@@ -247,7 +266,8 @@ fn partial_subgrad(
 }
 
 impl AlgState {
-    /// Same as old `new_with_val_buf`, but actually computes the correct subgradient of the objective function.
+    /// Create a new AlgState at the given slope (for the L1 problem on the given lines) using the provided value buffer.
+    /// `use_exact_subgrad` determines whether to use the exact subgradient or a partial subgradient that gives a superset of the actual one.
     pub fn new_with_val_buf(
         slope: Floating,
         lines: &mut [(DualLine, Floating)],
@@ -260,7 +280,7 @@ impl AlgState {
         let n = lines.len();
         let (median_line, subgrad) = if use_exact_subgrad {
             if n % 2 == 1 {
-                // --- ODD Case: Unique Median ---
+                // ODD Case: Unique Median
                 let median_idx = n / 2;
 
                 // In the odd case, the partition for min and max is the same.
@@ -273,7 +293,7 @@ impl AlgState {
 
                 (median_line, ClosedInterval::new(bounds))
             } else {
-                // --- EVEN Case: Lower and Upper Median ---
+                // EVEN Case: Lower and Upper Median
                 let upper_median_idx = n / 2;
                 let lower_median_idx = upper_median_idx - 1;
 
@@ -321,6 +341,7 @@ impl AlgState {
         }
     }
 
+    /// Determine the L1 line estimate indicated by this state by evaluating its associated median line.
     #[inline]
     pub fn line_estimate(&self) -> PrimalLine {
         PrimalLine {
@@ -328,6 +349,8 @@ impl AlgState {
         }
     }
 
+    /// Get the objective value of the line estimate indicated by this state, using a cached value if available.
+    /// Costs O(n) if the cached value is not available.
     pub fn get_or_compute_obj_val_cached(&mut self, points: &[PrimalPoint]) -> Floating {
         let line_estimate = self.line_estimate();
         *self
@@ -351,12 +374,16 @@ impl L1LineObsState {
     }
 }
 
-/// An observable (i.e. returned by the method) algorithm state for a single slope
+/// An observable (i.e. returned by the method) algorithm state for a single slope.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct L1LineObsState {
+    /// The primal slope m of this state.
     pub slope: Floating,
+    /// A dual line with median value at the slope m.
     pub median_line: DualLine,
+    /// The L1 line estimate indicated by the median line.
     pub line_estimate: PrimalLine,
+    /// Whether or not this state is already stationary.
     pub state_type: L1LineObsStateType,
     /// Value of the objective function (if it is known)
     pub obj_val: Option<Floating>,
@@ -390,13 +417,18 @@ impl From<AlgState> for L1LineObsState {
     }
 }
 
+/// Some auxiliary information about the solver.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub struct SolverInfo {
+    /// Number of iterations performed by the solver.
     pub num_iters: usize,
+    /// Number of expansion steps performed by the solver.
     pub num_expansion: usize,
+    /// Number of subdivision steps performed by the solver.
     pub num_subdiv: usize,
 }
 
+/// The main struct implementing the actual solver logic (via its [Iterator] instance).
 #[derive(Debug, Clone)]
 pub struct PalpGen<'a, Delta = DoubleIntervalSize> {
     // state: Option<AlgState>,
@@ -412,6 +444,9 @@ pub struct PalpGen<'a, Delta = DoubleIntervalSize> {
     use_exact_subgrad: bool,
 }
 
+/// How certain you are about the initial guess of the solution.
+/// Zero uncertainty means that the initial guess is exact --- in which case there's no point in calling the solver.
+/// The uncertainty is given relative to the size of the initial guess, for details please see the associated paper.
 pub struct Uncertainty(pub Floating);
 
 impl Default for Uncertainty {
@@ -420,10 +455,13 @@ impl Default for Uncertainty {
     }
 }
 
+/// A trait for implementing different stepsize rules.
+/// In the notation of the paper this is \delta_k / (µ |m_0|) where µ is the uncertainty and m_0 the initial guess.
 pub trait StepsizeRule {
     fn stepsize(&mut self, num_iters: usize) -> Floating;
 }
 
+/// A stepsize rule that doubles the interval size with each iteration.
 pub struct DoubleIntervalSize;
 
 impl StepsizeRule for DoubleIntervalSize {
@@ -620,6 +658,7 @@ impl<Delta: StepsizeRule> PalpGen<'_, Delta> {
 
 impl<Delta: StepsizeRule> Iterator for PalpGen<'_, Delta> {
     type Item = PalpObsState;
+    /// Advances the main algorithm to the next state by taking an expansion or subdivision step.
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.fuse_blown {
@@ -652,7 +691,7 @@ impl<Delta: StepsizeRule> Iterator for PalpGen<'_, Delta> {
                 }
             }
             _ if self.info.num_iters == 1 => {
-                // first step should always return the "starting guess"
+                // first step should always return the "starting guess". This isn't really needed, but it's "nice".
                 Some(PalpObsState {
                     options: [L1LineObsState::from(*a), L1LineObsState::from(*b)],
                     info: self.info,
@@ -674,6 +713,8 @@ pub fn l1line(points: &[PrimalPoint]) -> Option<PrimalLine> {
     l1line_with_info::<true>(points).map(|sol| sol.optimal_line)
 }
 
+/// A solution to the least-absolute-deviations line problem.
+/// Consists of the optimal line, the associated objective value, and some solver statistics (like the number of iterations).
 pub struct Solution {
     pub optimal_line: PrimalLine,
     pub objective_value: Floating,
@@ -681,7 +722,9 @@ pub struct Solution {
 }
 
 #[inline]
-/// Apply an affine coordinate transformation to the given points to improve numerical stability.
+/// Apply an affine coordinate transformation to the given points to improve numerical stability. Maps all points into the square [-1,1]².
+/// The returned closure implements the inverse transformation.
+/// Allocation could be avoided at this point by overwriting the given points.
 fn get_transform(
     points: &[PrimalPoint],
 ) -> Option<(Vec<PrimalPoint>, impl Fn(Solution) -> Solution)> {
@@ -751,20 +794,18 @@ fn get_transform(
 /// Returns `None` if the slope is undefined, which occurs if:
 /// 1. There are fewer than 2 points.
 /// 2. All points have the same x-coordinate (a vertical line).
+///
+/// TODO: Better implementation. Maybe using Welford's algorithm --- maybe just using kbn_sum instead of sum.
 pub fn least_squares_slope(points: &[PrimalPoint]) -> Option<Floating> {
     let n = points.len();
     if n < 2 {
         return None;
     }
 
-    // 1. Calculate the means (centroids) of x and y.
     let n_float = Floating::from(n as f64);
     let mean_x = points.iter().map(|p| p.x()).sum::<Floating>() / n_float;
     let mean_y = points.iter().map(|p| p.y()).sum::<Floating>() / n_float;
 
-    // 2. Calculate the numerator and denominator for the slope formula.
-    //    Numerator:   sum((x_i - mean_x) * (y_i - mean_y))
-    //    Denominator: sum((x_i - mean_x)^2)
     let mut numerator = Floating::zero();
     let mut denominator = Floating::zero();
 
@@ -775,10 +816,8 @@ pub fn least_squares_slope(points: &[PrimalPoint]) -> Option<Floating> {
         denominator += dx * dx;
     }
 
-    // 3. Avoid division by zero for vertical lines.
-    // A small epsilon could be used here for more robust floating point comparison.
     if denominator.is_zero() {
-        return None; // Slope is undefined (infinite)
+        return None;
     }
 
     Some(numerator / denominator)

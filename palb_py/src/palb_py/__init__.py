@@ -1,7 +1,13 @@
+"""
+PALB is an exact, robust, high-performance solver for the Least-Absolute-Deviations-Line (LAD) problem, i.e. one dimensional affine linear L1 regression. This is the Python API to the core Rust implementation.
+"""
+
+from functools import wraps
+
+import numpy as np
+
 import palb_py._core as _core
 from palb_py._core import RegressionResult
-from functools import wraps
-import numpy as np
 
 
 @wraps(_core.l1line)
