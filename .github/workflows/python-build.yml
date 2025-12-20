@@ -3,6 +3,8 @@
 #
 #    maturin generate-ci github --manifest-path palb_py/Cargo.toml --platform manylinux musllinux windows macos
 #
+# Manually removed macos 13 as the runner images are retired: https://github.com/actions/runner-images/issues/13046
+#
 name: CI
 
 on:
@@ -141,8 +143,6 @@ jobs:
     strategy:
       matrix:
         platform:
-          - runner: macos-13
-            target: x86_64
           - runner: macos-14
             target: aarch64
     steps:
