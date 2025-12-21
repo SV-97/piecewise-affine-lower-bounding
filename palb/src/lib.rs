@@ -824,8 +824,8 @@ pub fn least_squares_slope(points: &[PrimalPoint]) -> Option<Floating> {
     }
 
     let n_float = Floating::from(n as f64);
-    let mean_x = points.iter().map(|p| p.x()).sum::<Floating>() / n_float;
-    let mean_y = points.iter().map(|p| p.y()).sum::<Floating>() / n_float;
+    let mean_x = points.iter().map(|p| p.x()).kbn_sum() / n_float;
+    let mean_y = points.iter().map(|p| p.y()).kbn_sum() / n_float;
 
     let mut numerator = Floating::zero();
     let mut denominator = Floating::zero();
