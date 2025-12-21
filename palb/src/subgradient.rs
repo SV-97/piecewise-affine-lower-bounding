@@ -1,49 +1,30 @@
-/// This is adapted from the rust standard library at https://doc.rust-lang.org/src/core/iter/traits/iterator.rs.html#2211-2214
-/// to avoid relying on nightly.
-/// Consequently this function is licensed according to MIT / Apache 2.0
-///
-/// See tracking issue [62543] to avoid this reimplementation in the future.
-fn partition_in_place<'a, S, T: 'a, P>(
-    some_iter: &mut S,
-    #[allow(clippy::toplevel_ref_arg)] ref mut predicate: P,
-) -> usize
+#[inline]
+fn partition_in_place<T, P>(data: &mut [T], mut predicate: P) -> usize
 where
-    S: Sized + DoubleEndedIterator<Item = &'a mut T>,
     P: FnMut(&T) -> bool,
 {
-    // FIXME: should we worry about the count overflowing? The only way to have more than
-    // `usize::MAX` mutable references is with ZSTs, which aren't useful to partition...
+    let mut l = 0;
+    let mut r = data.len();
 
-    // These closure "factory" functions exist to avoid genericity in `Self`.
-
-    #[inline]
-    fn is_false<'a, T>(
-        predicate: &'a mut impl FnMut(&T) -> bool,
-        true_count: &'a mut usize,
-    ) -> impl FnMut(&&mut T) -> bool + 'a {
-        move |x| {
-            let p = predicate(&**x);
-            *true_count += p as usize;
-            !p
+    loop {
+        while l < r && predicate(&data[l]) {
+            l += 1;
         }
-    }
 
-    #[inline]
-    fn is_true<T>(predicate: &mut impl FnMut(&T) -> bool) -> impl FnMut(&&mut T) -> bool + '_ {
-        move |x| predicate(&**x)
-    }
+        while l < r && !predicate(&data[r - 1]) {
+            r -= 1;
+        }
 
-    // Repeatedly find the first `false` and swap it with the last `true`.
-    let mut true_count = 0;
-    while let Some(head) = some_iter.find(is_false(predicate, &mut true_count)) {
-        if let Some(tail) = some_iter.rfind(is_true(predicate)) {
-            std::mem::swap(head, tail);
-            true_count += 1;
-        } else {
+        if l >= r {
             break;
         }
+
+        data.swap(l, r - 1);
+
+        l += 1;
+        r -= 1;
     }
-    true_count
+    l
 }
 
 /// Partitions a slice in place such that all elements for which the predicate is true precede those where
@@ -52,7 +33,7 @@ pub fn partition_slice<T, P>(slice: &mut [T], predicate: P) -> (&mut [T], &mut [
 where
     P: FnMut(&T) -> bool,
 {
-    let n_part_1 = partition_in_place(&mut slice.iter_mut(), predicate);
+    let n_part_1 = partition_in_place(slice, predicate);
     slice.split_at_mut(n_part_1)
 }
 
