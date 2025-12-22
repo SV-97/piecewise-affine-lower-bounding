@@ -111,6 +111,13 @@ use palb::{Floating, PrimalPoint, l1line};
 
 For further details please see the API docs at [docs.rs](https://docs.rs/palb) and browse [the code examples](palb/examples).
 
+> [!TIP]
+> You can clone this repo and run the code examples on your machine by running:
+> ```shell
+> cargo run --example simple
+> cargo run --example generator
+> ```
+
 > [!NOTE]  
 > Note that there is a simple higher level API in the form of the `l1line` function and its variants, but also a lower level generator API if you need / want more control. In particular this latter API allows you to tweak the solver parameters.
 
@@ -142,13 +149,13 @@ There is no published preprint yet.
 
 > [!NOTE]  
 > If you find PALB useful in your work please cite the associated paper as:
-```bibtex
-@article{
-    name="Fast and Exact Least Absolute Deviations Line Fitting via Piecewise Affine Lower-Bounding",
-    author="Stefan Volz and Martin Storath and Andreas Weinmann",
-    ... % rest TBD 
-}
-```
+> ```bibtex
+> @article{
+>     name="Fast and Exact Least Absolute Deviations Line Fitting via Piecewise Affine Lower-Bounding",
+>     author="Stefan Volz and Martin Storath and Andreas Weinmann",
+>     ... % rest TBD 
+> }
+> ```
 
 ## Some images
 
