@@ -1,0 +1,11 @@
+[project]
+name = "this-is-a-test"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.3.5",
+    "palb-py>=0.1.2",
+    "plotly>=6.5.0",
+]
