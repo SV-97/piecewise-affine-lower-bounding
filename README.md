@@ -143,19 +143,24 @@ For details please see the associated paper.
 
 ## Preprint
 
-There is no published preprint yet.
+There is a preprint published on the arXiv at [https://arxiv.org/abs/2512.20682](https://arxiv.org/abs/2512.20682).
 
 ## Citing
 
 > [!NOTE]  
-> If you find PALB useful in your work please cite the associated paper as:
+> If you find PALB useful in your work please cite the associated preprint as:
 > ```bibtex
-> @article{
->     name="Fast and Exact Least Absolute Deviations Line Fitting via Piecewise Affine Lower-Bounding",
->     author="Stefan Volz and Martin Storath and Andreas Weinmann",
->     ... % rest TBD 
+> @article{volz2025fast,
+>   title={Fast and Exact Least Absolute Deviations Line Fitting via Piecewise Affine Lower-Bounding},
+>   author={Stefan Volz and Martin Storath and Andreas Weinmann},
+>   journal={arXiv preprint arXiv:2512.20682},
+>   year={2025},
+>   doi={10.48550/arXiv.2512.20682},
+>   url={https://arxiv.org/abs/2512.20682}
 > }
 > ```
+
+(The actual paper is currently still in review. We will replace this reference with the paper once it is published)
 
 ## Some images
 
