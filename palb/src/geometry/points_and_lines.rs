@@ -5,7 +5,7 @@ use num_traits::Zero;
 use crate::Floating;
 
 /// A point in the plane given by (x,y) coordinates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PrimalPoint {
     pub coords: (Floating, Floating),
 }
@@ -33,20 +33,20 @@ impl PrimalPoint {
 /// These lines γ(x) = (x, mx+t) all satisfy y₀ = mx₀ + t and hence t = -x₀m + y₀.
 /// This second equation shows that the lines through the point correspond to a line
 /// in the dual space (parametrized by m and t). This struct represents such a line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct DualLine {
     pub coords: (Floating, Floating),
 }
 
 /// A point in dual space (dual to a line in primal space)
 // derived Ord instance implements lexicographic order which works for us.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DualPoint {
     pub coords: (Floating, Floating),
 }
 
 /// A line in primal (ordinary) space given by slope and intercept
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct PrimalLine {
     pub coords: (Floating, Floating),
 }
