@@ -384,7 +384,7 @@ impl L1LineObsState {
 /// See [L1LineObsState].
 /// This groups two of those for the two interval boundaries managed by the algorithm.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct PalpObsState {
+pub struct PalbObsState {
     pub options: [L1LineObsState; 2],
     pub info: SolverInfo,
 }
@@ -580,7 +580,7 @@ impl<'a, Buf: AsMut<[(DualLine, Floating)]>, Delta: StepsizeRule> PalbGen<'a, Bu
 
 impl<Buf: AsMut<[(DualLine, Floating)]>, Delta: StepsizeRule> PalbGen<'_, Buf, Delta> {
     #[inline]
-    fn finalize_with_a_optimal(&mut self) -> PalpObsState {
+    fn finalize_with_a_optimal(&mut self) -> PalbObsState {
         let [a, b] = self.options;
         let options = [
             L1LineObsState {
@@ -590,14 +590,14 @@ impl<Buf: AsMut<[(DualLine, Floating)]>, Delta: StepsizeRule> PalbGen<'_, Buf, D
             L1LineObsState::from(b),
         ];
         self.fuse_blown = true;
-        PalpObsState {
+        PalbObsState {
             options,
             info: self.info,
         }
     }
 
     #[inline]
-    fn finalize_with_b_optimal(&mut self) -> PalpObsState {
+    fn finalize_with_b_optimal(&mut self) -> PalbObsState {
         let [a, b] = self.options;
         let options = [
             L1LineObsState::from(a),
@@ -607,14 +607,14 @@ impl<Buf: AsMut<[(DualLine, Floating)]>, Delta: StepsizeRule> PalbGen<'_, Buf, D
             },
         ];
         self.fuse_blown = true;
-        PalpObsState {
+        PalbObsState {
             options,
             info: self.info,
         }
     }
 
     #[inline]
-    fn subdivide(&mut self) -> PalpObsState {
+    fn subdivide(&mut self) -> PalbObsState {
         self.info.num_subdiv += 1;
         if !self.subdividing {
             self.subdividing = true;
@@ -670,14 +670,14 @@ impl<Buf: AsMut<[(DualLine, Floating)]>, Delta: StepsizeRule> PalbGen<'_, Buf, D
             unreachable!()
         }
         let options = self.options.map(L1LineObsState::from);
-        PalpObsState {
+        PalbObsState {
             options,
             info: self.info,
         }
     }
 
     #[inline]
-    fn expand(&mut self) -> PalpObsState {
+    fn expand(&mut self) -> PalbObsState {
         self.info.num_expansion += 1;
         let direction = -self.options[0].subgrad.uniform_sign();
 
@@ -708,16 +708,15 @@ impl<Buf: AsMut<[(DualLine, Floating)]>, Delta: StepsizeRule> PalbGen<'_, Buf, D
             Sign::Zero => unreachable!(),
         };
         let options = self.options.map(L1LineObsState::from);
-        PalpObsState {
+        PalbObsState {
             options,
             info: self.info,
         }
     }
 }
 
-impl<Delta: StepsizeRule> Iterator for PalpGen<'_, Delta> {
-    type Item = PalpObsState;
-    /// Advances the main algorithm to the next state by taking an expansion or subdivision step.
+impl<Buf: AsMut<[(DualLine, Floating)]>, Delta: StepsizeRule> Iterator for PalbGen<'_, Buf, Delta> {
+    type Item = PalbObsState;
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.fuse_blown {
@@ -751,7 +750,7 @@ impl<Delta: StepsizeRule> Iterator for PalpGen<'_, Delta> {
             }
             _ if self.info.num_iters == 1 => {
                 // first step should always return the "starting guess". This isn't really needed, but it's "nice".
-                Some(PalpObsState {
+                Some(PalbObsState {
                     options: [L1LineObsState::from(*a), L1LineObsState::from(*b)],
                     info: self.info,
                 })
