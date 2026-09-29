@@ -34,21 +34,65 @@ impl Neg for Sign {
     }
 }
 
+#[allow(unused)]
+pub enum TieBreak {
+    MinSlope,
+    MaxSlope,
+    Any,
+}
+
 impl<T> ClosedInterval<T>
 where
-    T: Signed,
+    T: Signed + std::fmt::Debug,
 {
     /// We say that [a,b] has a uniform sign of 0 if it contains 0,
     /// uniform positive sign if all its values are positive,
     /// and uniform negative sign if all its values are negative.
     #[inline]
     pub fn uniform_sign(&self) -> Sign {
-        if self.bounds[0].is_positive() {
-            Sign::Pos
-        } else if self.bounds[1].is_negative() {
-            Sign::Neg
-        } else {
-            Sign::Zero
+        let g_min = &self.bounds[0];
+        let g_max = &self.bounds[1];
+
+        // Setting TieBreak to MinSlope or MaxSlope causes palb to determine minimal and maximal slopes --- ish.
+        // While this worked fine in our testing, it's clear that there are edge cases that need some additional handling.
+        // For instance: if the two starting points both are stationary then we really need to first enlarge / shift the
+        // interval to ensure that it contains the max / min slopes.
+        // So consider all `tie_break` values except for `Any` to be highly experimental at this point,
+        // and more of a proof of concept.
+        let tie_break = TieBreak::Any;
+        match tie_break {
+            TieBreak::Any => {
+                // Strict check: stops anywhere on the plateau
+                if g_min.is_positive() && !g_min.is_zero() {
+                    Sign::Pos
+                } else if g_max.is_negative() && !g_max.is_zero() {
+                    Sign::Neg
+                } else {
+                    Sign::Zero
+                }
+            }
+            TieBreak::MinSlope => {
+                // Biased left: treats 0 as positive to force decreasing slope.
+                // Stops ONLY when g_min is strictly negative (left kink).
+                if g_min.is_positive() || g_min.is_zero() {
+                    Sign::Pos
+                } else if g_max.is_negative() && !g_max.is_zero() {
+                    Sign::Neg
+                } else {
+                    Sign::Zero
+                }
+            }
+            TieBreak::MaxSlope => {
+                // Biased right: treats 0 as negative to force increasing slope.
+                // Stops ONLY when g_max is strictly positive (right kink).
+                if g_min.is_positive() && !g_min.is_zero() {
+                    Sign::Pos
+                } else if g_max.is_negative() || g_max.is_zero() {
+                    Sign::Neg
+                } else {
+                    Sign::Zero
+                }
+            }
         }
     }
 }
