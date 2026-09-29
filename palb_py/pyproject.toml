@@ -1,11 +1,11 @@
 [project]
 name = "palb-py"
-version = "0.1.2"
+version = "0.1.3"
 description = "A fast and exact method for solving least absolute deviations line problems (Affine-linear L1 regression)."
 authors = [
     { name = "Stefan Volz", email = "volzstefan97@googlemail.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = ["numpy"]
 
 [project.scripts]
