@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use palb::{self, DoubleIntervalSize, Floating, PrimalPoint, Uncertainty};
 use take_until::TakeUntilExt;
 
@@ -38,17 +36,21 @@ fn sample_data() -> Vec<PrimalPoint> {
 }
 
 fn main() {
-    let points = sample_data();
+    // generate some sample data. Note the mutable binding so that palb can operate in-place without reallocation.
+    let mut points = sample_data();
     // Alternatively to the higher level l1line function (and variants) you can also use
     // the lower-level iterator interface if you need / want more control.
     // Note that this does *not* automatically normalize the data in the same way the higher level functions do.
 
     // compute the least squares solution as initial guess (you can do whatever you want here. Just don't start from zero)
-    let initial_guess = palb::least_squares_slope(&points).unwrap();
+    let eps = Floating::from(1e-10);
+    let initial_guess = palb::least_squares_slope(&points, eps)
+        .canonicalize() // convert to a canonical form (None for ill-posed problems, zero for vertical lines)
+        .unwrap();
     // construct the new generator starting at that initial guess using a default uncertainty for this initial guess
-    let res = palb::PalpGen::new(
+    let res = palb::PalbGen::new(
         initial_guess,
-        Cow::Owned(points),
+        &mut points,
         Uncertainty::default(),
         DoubleIntervalSize, // stepsize rule
     )

@@ -35,7 +35,7 @@ fn sample_data() -> Vec<PrimalPoint> {
 }
 
 fn main() {
-    let points = sample_data();
-    let res = palb::l1line(&points).unwrap();
+    let mut points = sample_data();
+    let res = palb::l1line(&mut points).unwrap();
     println!("The result is {:?}", res);
 }
