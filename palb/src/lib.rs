@@ -1,12 +1,12 @@
 //! PALB is an exact, robust, high-performance solver for the Least-Absolute-Deviations-Line (LAD) problem, i.e. one dimensional affine linear L1 regression.
 //! This is the Rust core; be aware that there is also a Python API (`palb_py`).
-use std::borrow::Cow;
-
 pub use geometry::{Dual, DualLine, PrimalLine, PrimalPoint};
 use interval::{ClosedInterval, Sign};
+use itertools::Itertools;
 use num_traits::{One, Signed, Zero};
 use ordered_float::OrderedFloat;
-use rand::seq::SliceRandom;
+use rand::{SeedableRng, rngs::ChaCha8Rng};
+
 use subgradient::partition_slice;
 mod geometry;
 mod interval;
@@ -15,7 +15,7 @@ mod subgradient;
 
 use take_until::TakeUntilExt;
 
-use crate::kbn_sum::KbnSumIteratorExt;
+pub use crate::kbn_sum::KbnSumIteratorExt;
 
 /// A simple wrapper around `f64` that specifies a total, and hence not IEEE754-compatible, order.
 pub type Floating = OrderedFloat<f64>;
@@ -156,6 +156,7 @@ fn solve_cont_knapsack_alpha<T>(
 }
 
 /// Computes one bound (min or max) of the exact subdifferential interval.
+#[inline]
 fn compute_subgrad_bound<const N: usize>(
     lines: &mut [(DualLine, Floating)],
     median_idx: usize,
@@ -174,18 +175,6 @@ fn compute_subgrad_bound<const N: usize>(
             partition_slice(lines, |(_, val)| *val < median_value - eps);
         let (equal, strictly_above) =
             partition_slice(equal_and_above, |(_, val)| *val <= median_value + eps);
-        /* Slower
-        let (strictly_below, equal, strictly_above) = three_way_partition(lines, |(_, val)| {
-            let diff = *val - median_value;
-            if diff < -eps {
-                std::cmp::Ordering::Less
-            } else if diff > eps {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
-         */
 
         // difference of the sums below and above the median
         let s_base = strictly_below
@@ -425,12 +414,15 @@ pub struct SolverInfo {
 }
 
 /// The main struct implementing the actual solver logic (via its [Iterator] instance).
-#[derive(Debug, Clone)]
-pub struct PalpGen<'a, Delta = DoubleIntervalSize> {
+#[derive(Debug)]
+pub struct PalbGen<'a, Buf, Delta = DoubleIntervalSize>
+where
+    Buf: AsMut<[(DualLine, Floating)]>,
+{
     // state: Option<AlgState>,
-    points: Cow<'a, [PrimalPoint]>, // this should probably be a &mut [PrimalPoint] instead
+    points: &'a mut [PrimalPoint],
     // lines: Vec<DualLine>,
-    line_val_buf: Vec<(DualLine, Floating)>,
+    line_val_buf: Buf,
     /// Whether we're currently "subdividing" or "expanding"
     subdividing: bool,
     options: [AlgState; 2],
@@ -438,11 +430,14 @@ pub struct PalpGen<'a, Delta = DoubleIntervalSize> {
     fuse_blown: bool,
     stepsize_rule: Delta,
     use_exact_subgrad: bool,
+    uncertainty: Uncertainty,
+    initial_slope: Floating,
 }
 
 /// How certain you are about the initial guess of the solution.
 /// Zero uncertainty means that the initial guess is exact --- in which case there's no point in calling the solver.
 /// The uncertainty is given relative to the size of the initial guess, for details please see the associated paper.
+#[derive(Debug, Clone, Copy)]
 pub struct Uncertainty(pub Floating);
 
 impl Default for Uncertainty {
@@ -463,7 +458,10 @@ pub struct DoubleIntervalSize;
 impl StepsizeRule for DoubleIntervalSize {
     #[inline(always)]
     fn stepsize(&mut self, num_iters: usize) -> Floating {
-        Floating::from(1 << num_iters)
+        // f64 exactly represents powers of 2 up to 2^1023.
+        // Cap at 1023 to avoid hitting f64::INFINITY.
+        let val = 2.0_f64.powi((num_iters as i32).min(f64::MAX_EXP - 1));
+        Floating::from(val)
     }
 }
 
@@ -486,6 +484,7 @@ impl AffineSupport {
     /// Computes the point of intersection of two lines in a numerically stable way.
     ///
     /// This works by computing the intersection of the lines in shifted coordinates and then translating it back to improve numerical stability.
+    #[inline]
     pub fn intersect_stable(self, other: &AffineSupport) -> Floating {
         let a = self;
         let b = other;
@@ -512,31 +511,59 @@ impl AffineSupport {
     }
 }
 
-impl<'a, Delta: StepsizeRule> PalpGen<'a, Delta> {
+impl<'a, Delta: StepsizeRule> PalbGen<'a, Vec<(DualLine, Floating)>, Delta> {
     pub fn new(
         some_primal_slope: Floating,
-        points: Cow<'a, [PrimalPoint]>,
+        points: &'a mut [PrimalPoint],
         uncertainty: Uncertainty,
         stepsize_rule: Delta,
     ) -> Self {
-        let mut line_val_buf = Vec::with_capacity(points.len());
-        line_val_buf.extend(
-            points
-                .iter()
-                .copied()
-                .map(PrimalPoint::dual)
-                .map(|l| (l, Floating::zero())),
-        );
+        let line_val_buf = vec![Default::default(); points.len()];
+        Self::new_with_val_buf(
+            some_primal_slope,
+            points,
+            line_val_buf,
+            uncertainty,
+            stepsize_rule,
+        )
+        .unwrap()
+    }
+}
+
+impl<'a, Buf: AsMut<[(DualLine, Floating)]>, Delta: StepsizeRule> PalbGen<'a, Buf, Delta> {
+    pub fn new_with_val_buf(
+        some_primal_slope: Floating,
+        points: &'a mut [PrimalPoint],
+        mut line_val_buf: Buf,
+        uncertainty: Uncertainty,
+        stepsize_rule: Delta,
+    ) -> Option<Self> {
+        let buf_slice = line_val_buf.as_mut();
+
+        if buf_slice.len() < points.len() {
+            // Buffer is too small
+            return None;
+        }
+
+        for (buf_slot, p) in buf_slice.iter_mut().zip(points.iter()) {
+            *buf_slot = (p.dual(), Floating::zero());
+        }
 
         let use_exact_subgrad = true;
 
         // determine two slopes whose accompanying subgradients hopefully have different (uniform) signs
+        let some_primal_slope = if some_primal_slope.is_zero() {
+            // choosing the uncertainty µ´ at this point results in one initial slope being zero and the other being 2µ.
+            uncertainty.0
+        } else {
+            some_primal_slope
+        };
         let options = [
             some_primal_slope * (Floating::one() + uncertainty.0),
             some_primal_slope * (Floating::one() - uncertainty.0),
         ]
-        .map(|slope| AlgState::new_with_val_buf(slope, &mut line_val_buf, use_exact_subgrad));
-        Self {
+        .map(|slope| AlgState::new_with_val_buf(slope, buf_slice, use_exact_subgrad));
+        Some(Self {
             points,
             line_val_buf,
             subdividing: false,
@@ -545,11 +572,13 @@ impl<'a, Delta: StepsizeRule> PalpGen<'a, Delta> {
             info: SolverInfo::default(),
             stepsize_rule,
             use_exact_subgrad,
-        }
+            uncertainty,
+            initial_slope: some_primal_slope.abs(),
+        })
     }
 }
 
-impl<Delta: StepsizeRule> PalpGen<'_, Delta> {
+impl<Buf: AsMut<[(DualLine, Floating)]>, Delta: StepsizeRule> PalbGen<'_, Buf, Delta> {
     #[inline]
     fn finalize_with_a_optimal(&mut self) -> PalpObsState {
         let [a, b] = self.options;
@@ -626,8 +655,11 @@ impl<Delta: StepsizeRule> PalpGen<'_, Delta> {
         };
 
         // let next_state = AlgState::new(next_slope, &mut self.lines, &self.points);
-        let next_state =
-            AlgState::new_with_val_buf(next_slope, &mut self.line_val_buf, self.use_exact_subgrad);
+        let next_state = AlgState::new_with_val_buf(
+            next_slope,
+            self.line_val_buf.as_mut(),
+            self.use_exact_subgrad,
+        );
 
         let sign_next = next_state.subgrad.uniform_sign();
         if sign_next == Sign::Zero || sign_next == a.subgrad.uniform_sign() {
@@ -653,16 +685,22 @@ impl<Delta: StepsizeRule> PalpGen<'_, Delta> {
         self.options = match direction {
             Sign::Pos => {
                 let new_b = AlgState::new_with_val_buf(
-                    b.slope + self.stepsize_rule.stepsize(self.info.num_iters),
-                    &mut self.line_val_buf,
+                    b.slope
+                        + self.uncertainty.0
+                            * self.initial_slope
+                            * self.stepsize_rule.stepsize(self.info.num_iters),
+                    self.line_val_buf.as_mut(),
                     self.use_exact_subgrad,
                 );
                 [b, new_b]
             }
             Sign::Neg => {
                 let new_a = AlgState::new_with_val_buf(
-                    a.slope - self.stepsize_rule.stepsize(self.info.num_iters),
-                    &mut self.line_val_buf,
+                    a.slope
+                        - self.uncertainty.0
+                            * self.initial_slope
+                            * self.stepsize_rule.stepsize(self.info.num_iters),
+                    self.line_val_buf.as_mut(),
                     self.use_exact_subgrad,
                 );
                 [new_a, a]
@@ -695,7 +733,7 @@ impl<Delta: StepsizeRule> Iterator for PalpGen<'_, Delta> {
                 } else {
                     self.use_exact_subgrad = true;
                     self.options = self.options.map(|state| {
-                        AlgState::new_with_val_buf(state.slope, &mut self.line_val_buf, true)
+                        AlgState::new_with_val_buf(state.slope, self.line_val_buf.as_mut(), true)
                     });
                     self.next()
                 }
@@ -706,7 +744,7 @@ impl<Delta: StepsizeRule> Iterator for PalpGen<'_, Delta> {
                 } else {
                     self.use_exact_subgrad = true;
                     self.options = self.options.map(|state| {
-                        AlgState::new_with_val_buf(state.slope, &mut self.line_val_buf, true)
+                        AlgState::new_with_val_buf(state.slope, self.line_val_buf.as_mut(), true)
                     });
                     self.next()
                 }
@@ -730,69 +768,129 @@ impl<Delta: StepsizeRule> Iterator for PalpGen<'_, Delta> {
 }
 
 /// Compute the least-absolute-deviations line for a given collection of points using the Piecewise Affine Lower Bounding (PALB) method.
-pub fn l1line(points: &[PrimalPoint]) -> Option<PrimalLine> {
+pub fn l1line(points: &mut [PrimalPoint]) -> Option<PrimalLine> {
     l1line_with_info::<true>(points).map(|sol| sol.optimal_line)
 }
 
-/// A solution to the least-absolute-deviations line problem.
-/// Consists of the optimal line, the associated objective value, and some solver statistics (like the number of iterations).
+/// Compute the least-absolute-deviations line for a given collection of points using the Piecewise Affine Lower Bounding (PALB) method
+/// given some starting slope and uncertainty.
+/// Also return some informations about the solver like the number of iterations it took etc.
+pub fn l1line_with_initial_guess<const NORMALIZE_INPUT: bool>(
+    points: &mut [PrimalPoint],
+    mut initial_slope: Option<Floating>,
+    uncertainty: Option<Uncertainty>,
+) -> Option<Solution> {
+    let inv_transform: Option<_> = if NORMALIZE_INPUT && points.len() > 1 {
+        let (inv_transform, aff) = get_transform(points).expect("Internal error");
+        if let Some(ref mut slope) = initial_slope {
+            *slope = *slope * aff.scaling.0 / aff.scaling.1;
+        }
+        Some(inv_transform)
+    } else {
+        None
+    };
+    let transform_back_or_dont = |sol: Solution| {
+        if let Some(transf) = inv_transform {
+            (transf)(sol)
+        } else {
+            sol
+        }
+    };
+    match trivial_solution_or_slope(points) {
+        None => None,
+        Some(TrivialSolutionOrSlope::ProblemTrivial(sol)) => Some(transform_back_or_dont(sol)),
+        Some(TrivialSolutionOrSlope::Slope(default_starting_slope)) => {
+            let max_steps = 15 * (points.len().ilog10() as usize) + 300;
+            PalbGen::new(
+                initial_slope.unwrap_or(default_starting_slope),
+                points,
+                uncertainty.unwrap_or_default(),
+                DoubleIntervalSize,
+            )
+            .take_until(|obs_state| {
+                (obs_state.options[0].slope - obs_state.options[1].slope).abs()
+                    < Floating::from(1e-15)
+            }) // stop iteration once the interval gets *tiny* (if that ever happens)
+            .take(max_steps) // at most this many iterations, then we bail out
+            .last()
+            .map(|obs_state| {
+                (
+                    obs_state
+                        .options
+                        .into_iter()
+                        .min_by_key(|state| state.get_or_compute_obj_val_noncached(points.as_ref()))
+                        .unwrap(),
+                    obs_state.info,
+                )
+            })
+            .map(|(state, info)| Solution {
+                optimal_line: state.line_estimate,
+                objective_value: state
+                    .obj_val
+                    .unwrap_or_else(|| state.get_or_compute_obj_val_noncached(points.as_ref())),
+                info,
+            })
+            .map(transform_back_or_dont)
+        }
+    }
+}
+
 pub struct Solution {
     pub optimal_line: PrimalLine,
     pub objective_value: Floating,
     pub info: SolverInfo,
 }
 
+struct AffineTransform {
+    scaling: (Floating, Floating),
+    #[allow(unused)]
+    translation: (Floating, Floating),
+}
+
 #[inline]
-/// Apply an affine coordinate transformation to the given points to improve numerical stability. Maps all points into the square [-1,1]².
-/// The returned closure implements the inverse transformation.
-/// Allocation could be avoided at this point by overwriting the given points.
+/// Apply an affine coordinate transformation to the given points in-place to improve numerical stability.
+/// Returns the inverse transform on solutions, as well as the affine transform which was applied to the data.
 fn get_transform(
-    points: &[PrimalPoint],
-) -> Option<(Vec<PrimalPoint>, impl Fn(Solution) -> Solution)> {
+    points: &mut [PrimalPoint],
+) -> Option<(impl Fn(Solution) -> Solution + 'static, AffineTransform)> {
     let n = points.len();
     if n < 2 {
         None
     } else {
         let n_float = Floating::from(points.len() as f64);
-        let x_mean = points.iter().map(|p| p.x()).sum::<Floating>() / n_float;
-        let y_mean = points.iter().map(|p| p.y()).sum::<Floating>() / n_float;
+        let z = Floating::from(0.0);
+        #[inline(always)]
+        fn app2<T1, T2, S1, S2>(
+            (x, y): (T1, S1),
+            f: impl FnOnce(T1) -> T2,
+            g: impl FnOnce(S1) -> S2,
+        ) -> (T2, S2) {
+            (f(x), g(y))
+        }
+        let (x_mean, y_mean) = app2(
+            points.iter().fold((z, z), |(x_mean, y_mean), p| {
+                (x_mean + p.x(), y_mean + p.y())
+            }),
+            |x| x / n_float,
+            |y| y / n_float,
+        );
 
-        let translated_points: Vec<_> = points
-            .iter()
-            .map(|p| PrimalPoint {
-                coords: (p.x() - x_mean, p.y() - y_mean),
-            })
-            .collect();
+        let one = Floating::from(1.0);
+        let (x_scaling, y_scaling) = app2(
+            points
+                .iter()
+                .map(|p| (p.x() - x_mean, p.y() - y_mean))
+                .fold((z, z), |(x_scaling, y_scaling), (x, y)| {
+                    (x_scaling.max(x.abs()), y_scaling.max(y.abs()))
+                }),
+            |x_scaling| if x_scaling.is_zero() { one } else { x_scaling },
+            |y_scaling| if y_scaling.is_zero() { one } else { y_scaling },
+        );
 
-        let x_scaling = translated_points
-            .iter()
-            .map(|p| p.x().abs())
-            .max()
-            .unwrap_or(Floating::from(1.0));
-        let y_scaling = translated_points
-            .iter()
-            .map(|p| p.y().abs())
-            .max()
-            .unwrap_or(Floating::from(1.0));
-
-        // handle degenerate cases
-        let x_scaling = if x_scaling == Floating::zero() {
-            Floating::from(1.0)
-        } else {
-            x_scaling
-        };
-        let y_scaling = if y_scaling == Floating::zero() {
-            Floating::from(1.0)
-        } else {
-            y_scaling
-        };
-
-        let scaled_points: Vec<_> = translated_points
-            .iter()
-            .map(|p| PrimalPoint {
-                coords: (p.x() / x_scaling, p.y() / y_scaling),
-            })
-            .collect();
+        // Apply both translation and scaling in a single in-place mutation pass
+        for p in points.iter_mut() {
+            p.coords = ((p.x() - x_mean) / x_scaling, (p.y() - y_mean) / y_scaling);
+        }
 
         let inverse_transform = move |mut solution: Solution| {
             let (slope_scaled, intercept_scaled) = solution.optimal_line.coords;
@@ -806,61 +904,99 @@ fn get_transform(
             solution
         };
 
-        Some((scaled_points, inverse_transform))
+        Some((
+            inverse_transform,
+            AffineTransform {
+                scaling: (x_scaling, y_scaling),
+                translation: (-x_mean, -y_mean),
+            },
+        ))
+    }
+}
+
+pub enum LeastSquaresSlopeResult {
+    NoPoints,
+    VerticalLine,
+    SlopeUnstable {
+        numerator: Floating,
+        denominator: Floating,
+    },
+    Slope(Floating),
+}
+
+impl LeastSquaresSlopeResult {
+    /// Converts the result to a canonical form, returning `None` for ill-posed problems
+    /// and a slope of zero for vertical lines or single points.
+    pub fn canonicalize(self) -> Option<Floating> {
+        match self {
+            LeastSquaresSlopeResult::NoPoints => None,
+            LeastSquaresSlopeResult::VerticalLine
+            | LeastSquaresSlopeResult::SlopeUnstable { .. } => Some(Floating::zero()),
+            LeastSquaresSlopeResult::Slope(s) => Some(s),
+        }
     }
 }
 
 /// Calculates the slope of the L2 regression line (ordinary least squares).
 ///
-/// Returns `None` if the slope is undefined, which occurs if:
-/// 1. There are fewer than 2 points.
-/// 2. All points have the same x-coordinate (a vertical line).
-///
-/// TODO: Better implementation. Maybe using Welford's algorithm --- maybe just using kbn_sum instead of sum.
-pub fn least_squares_slope(points: &[PrimalPoint]) -> Option<Floating> {
+/// Returns [NoPoints] if there are no points,
+/// VerticalLine if all points have exactly the same x-coordinate (in particular if there is just one point),
+/// SlopeUnstable(s) if the x-coordinates are within epsilon of each other (i.e. the line is nearly vertical),
+/// and Slope(s) otherwise.
+pub fn least_squares_slope(points: &[PrimalPoint], epsilon: Floating) -> LeastSquaresSlopeResult {
     let n = points.len();
-    if n < 2 {
-        return None;
+    if n == 0 {
+        return LeastSquaresSlopeResult::NoPoints;
+    } else if n == 1 {
+        // if there's just one point then all xs are equal i.e. we have a "vertical" line
+        return LeastSquaresSlopeResult::VerticalLine;
     }
 
     let n_float = Floating::from(n as f64);
     let mean_x = points.iter().map(|p| p.x()).kbn_sum() / n_float;
     let mean_y = points.iter().map(|p| p.y()).kbn_sum() / n_float;
 
-    let mut numerator = Floating::zero();
-    let mut denominator = Floating::zero();
-
-    for p in points {
-        let dx = p.x() - mean_x;
-        let dy = p.y() - mean_y;
-        numerator += dx * dy;
-        denominator += dx * dx;
-    }
+    // Numerator:   sum((x_i - mean_x) * (y_i - mean_y))
+    // Denominator: sum((x_i - mean_x)^2)
+    let numerator = points
+        .iter()
+        .map(|p| (p.x() - mean_x) * (p.y() - mean_y))
+        .kbn_sum();
+    let denominator = points
+        .iter()
+        .map(|p| {
+            let dx = p.x() - mean_x;
+            dx * dx
+        })
+        .kbn_sum();
 
     if denominator.is_zero() {
-        return None;
+        // All xs coincide with the mean, in particular they are equal.
+        return LeastSquaresSlopeResult::VerticalLine;
+    } else if denominator.abs() < epsilon {
+        // Same as above modulo some epsilon
+        return LeastSquaresSlopeResult::SlopeUnstable {
+            numerator,
+            denominator,
+        };
+    } else {
+        LeastSquaresSlopeResult::Slope(numerator / denominator)
     }
-
-    Some(numerator / denominator)
 }
 
-/// Compute the least-absolute-deviations line for a given collection of points using the Piecewise Affine Lower Bounding (PALB) method.
-/// Also return some informations about the solver like the number of iterations it took etc.
-pub fn l1line_with_info<const NORMALIZE_INPUT: bool>(points: &[PrimalPoint]) -> Option<Solution> {
-    let (points, inv_transform): (Cow<[PrimalPoint]>, Option<_>) =
-        if NORMALIZE_INPUT && points.len() > 1 {
-            let (owned_points, inv_transform) = get_transform(points).expect("Internal error");
-            (Cow::Owned(owned_points), Some(inv_transform))
-        } else {
-            (Cow::Borrowed(points), None)
-        };
+enum TrivialSolutionOrSlope {
+    ProblemTrivial(Solution),
+    Slope(Floating),
+}
 
-    let starting_slope = match points.as_ref() {
-        [] => {
-            return None;
-        }
+// Returns None if the problem is not well-posed (there are no points)
+// If all points have the same x-value, the slope is initialized to zero
+// (the optimal line then has a median of the y-values as intercept)
+fn trivial_solution_or_slope(points: &[PrimalPoint]) -> Option<TrivialSolutionOrSlope> {
+    match points.as_ref() {
+        [] => None,
         [p] => {
-            return Some(Solution {
+            let sol = Solution {
                 optimal_line: PrimalLine {
                     coords: (Floating::zero(), p.y()),
                 },
@@ -870,86 +1006,244 @@ pub fn l1line_with_info<const NORMALIZE_INPUT: bool>(points: &[PrimalPoint]) -> 
                     num_expansion: 0,
                     num_subdiv: 0,
                 },
-            });
+            };
+            Some(TrivialSolutionOrSlope::ProblemTrivial(sol))
         }
-        points @ [p1, .., p2] if points.len() <= 100 => (p1.y() - p2.y()) / (p1.x() - p2.x()),
-        points => {
-            //let mut rng = rand::rng();
-            //let mut points = points.to_owned();
-            //let (ten_points, _rest) = points.partial_shuffle(&mut rng, 10);
-            //let ten_points = first_and_last_5(points).unwrap();
-            //l1line(&ten_points).unwrap().slope()
-            least_squares_slope(points).unwrap_or_else(|| {
-                let mut rng = rand::rng();
-                let mut points = points.to_owned();
-                let (sample_of_points, _rest) = points.partial_shuffle(&mut rng, 100);
-                l1line(sample_of_points).unwrap().slope()
-            })
-        } /*points if points.len() <= 10_000 => {
-              let mut rng = rand::rng();
-              let mut points = points.to_owned();
-              let (sample, _rest) = points.partial_shuffle(&mut rng, 100);
-              // let twenty_points = first_and_last_10(points).unwrap();
-              l1line(&sample).unwrap().slope()
-          }
-          points => {
-              //let hundred_points = first_and_last_50(points).unwrap();
-              //l1line(&hundred_points).unwrap().slope()
-              let mut rng = rand::rng();
-              let mut points = points.to_owned();
-              let (sample, _rest) = points.partial_shuffle(&mut rng, 1000);
-              l1line(&sample).unwrap().slope()
-          }*/
-    };
+        points @ [p1, ..] if points.len() <= 100 => {
+            // try to find a point with a different x-coordinate than p1
+            if let Some(p2) = points.iter().rev().find(|p| p.x() != p1.x()) {
+                let slope = (p1.y() - p2.y()) / (p1.x() - p2.x());
+                Some(TrivialSolutionOrSlope::Slope(slope))
+            } else {
+                // Degenerate case: all points share the exact same x-coordinate.
+                // One possible optimal line has a slope of zero and any median of the y-values as intercept;
+                // we hence return this as the optimal line.
 
-    let max_steps = 15 * (points.len().ilog10() as usize) + 300;
-    PalpGen::new(
-        starting_slope,
-        points.clone(),
-        Uncertainty::default(),
-        DoubleIntervalSize,
-    )
-    .take_until(|obs_state| {
-        (obs_state.options[0].slope - obs_state.options[1].slope).abs() < Floating::from(1e-15)
-    }) // stop iteration once the interval gets *tiny* (if that ever happens)
-    .take(max_steps) // at most this many iterations, then we bail out
-    .last()
-    .map(|obs_state| {
-        (
-            obs_state
-                .options
-                .into_iter()
-                .min_by_key(|state| state.get_or_compute_obj_val_noncached(points.as_ref()))
-                .unwrap(),
-            obs_state.info,
-        )
-    })
-    .map(|(state, info)| Solution {
-        optimal_line: state.line_estimate,
-        objective_value: state
-            .obj_val
-            .unwrap_or_else(|| state.get_or_compute_obj_val_noncached(points.as_ref())),
-        info,
-    })
-    .map(|sol| {
-        if let Some(transf) = inv_transform {
+                // we make a copy of the y-values so that we can sort them without modifying the original
+                let mut ys = points.iter().copied().map(PrimalPoint::y).collect_vec();
+                let mid = ys.len() / 2;
+                let (_, &mut median, _) = ys.select_nth_unstable(mid);
+                let optimal_line = PrimalLine {
+                    coords: (Floating::zero(), median),
+                };
+                let sol = Solution {
+                    optimal_line,
+                    objective_value: objective_value(optimal_line, points),
+                    info: SolverInfo::default(),
+                };
+                Some(TrivialSolutionOrSlope::ProblemTrivial(sol))
+            }
+        }
+        points => {
+            let slope = match least_squares_slope(points, Floating::from(1e-10)) {
+                LeastSquaresSlopeResult::NoPoints => return None,
+                LeastSquaresSlopeResult::VerticalLine => Floating::zero(),
+                LeastSquaresSlopeResult::SlopeUnstable { .. } => {
+                    // we set some arbitrary seed for reproducibility
+                    let seed: [u8; 32] = [142; 32];
+                    let mut rng = ChaCha8Rng::from_seed(seed);
+                    // sample indices (to avoid cloning all points)
+                    let sample_indices = rand::seq::index::sample(&mut rng, points.len(), 100);
+                    let mut sample_of_points =
+                        sample_indices.into_iter().map(|i| points[i]).collect_vec();
+                    l1line(&mut sample_of_points).unwrap().slope()
+                }
+                LeastSquaresSlopeResult::Slope(s) => s,
+            };
+            Some(TrivialSolutionOrSlope::Slope(slope))
+        }
+    }
+}
+
+/// Compute the least-absolute-deviations line for a given collection of points using the Piecewise Affine Lower Bounding (PALB) method.
+/// Also return some informations about the solver like the number of iterations it took etc.
+pub fn l1line_with_info<const NORMALIZE_INPUT: bool>(
+    points: &mut [PrimalPoint],
+) -> Option<Solution> {
+    let inv_transform: Option<_> = if NORMALIZE_INPUT && points.len() > 1 {
+        let inv_transform = get_transform(points).expect("Internal error");
+        Some(inv_transform)
+    } else {
+        None
+    };
+    let transform_back_or_dont = |sol: Solution| {
+        if let Some((transf, _)) = inv_transform {
             (transf)(sol)
         } else {
             sol
         }
-    })
+    };
+    match trivial_solution_or_slope(points) {
+        None => None,
+        Some(TrivialSolutionOrSlope::ProblemTrivial(sol)) => Some(transform_back_or_dont(sol)),
+        Some(TrivialSolutionOrSlope::Slope(starting_slope)) => {
+            let max_steps = 15 * (points.len().ilog10() as usize) + 300;
+            PalbGen::new(
+                starting_slope,
+                points,
+                Uncertainty::default(),
+                DoubleIntervalSize,
+            )
+            .take_until(|obs_state| {
+                (obs_state.options[0].slope - obs_state.options[1].slope).abs()
+                    < Floating::from(1e-15)
+            }) // stop iteration once the interval gets *tiny* (if that ever happens)
+            .take(max_steps) // at most this many iterations, then we bail out
+            .last()
+            .map(|obs_state| {
+                (
+                    obs_state
+                        .options
+                        .into_iter()
+                        .min_by_key(|state| state.get_or_compute_obj_val_noncached(points.as_ref()))
+                        .unwrap(),
+                    obs_state.info,
+                )
+            })
+            .map(|(state, info)| Solution {
+                optimal_line: state.line_estimate,
+                objective_value: state
+                    .obj_val
+                    .unwrap_or_else(|| state.get_or_compute_obj_val_noncached(points.as_ref())),
+                info,
+            })
+            .map(transform_back_or_dont)
+        }
+    }
+}
+
+/// A small wrapper around [PalbGen] that allows efficiently processing a sequence of
+/// points in a sliding window fashing (including warmstarting from one window to the next).
+/// Note that the sliding windows are more of an example at this point: the implementation of this struct
+/// and in particular its Iterator implementation
+/// can be considered as a prototypical example of other warmstarting strategies for more general problems.
+pub struct WindowedPalb<'a, const NORMALIZE_INPUT: bool> {
+    points: &'a mut [PrimalPoint],
+    window_size: usize,
+    current_start: usize,
+    max_steps: usize,
+
+    starting_slope: Floating,
+    window_points: Vec<PrimalPoint>,
+    line_val_buf: Vec<(DualLine, Floating)>,
+
+    inv_transform: Option<Box<dyn Fn(Solution) -> Solution + 'static>>,
+}
+
+impl<'a, const NORMALIZE_INPUT: bool> WindowedPalb<'a, NORMALIZE_INPUT> {
+    pub fn new(
+        points: &'a mut [PrimalPoint],
+        window_size: usize,
+        starting_slope: Option<Floating>,
+    ) -> Option<Self> {
+        if points.len() < window_size || window_size < 2 {
+            // in this case no solutions exist or they are all trivial.
+            // Handling the trivial case in the following gets a bit annoying so we just bail out
+            return None;
+        }
+        let inv_transform: Option<_> = if NORMALIZE_INPUT && points.len() > 1 {
+            let (inv_transform, _) = get_transform(points).expect("Internal error");
+            let it: Box<dyn Fn(Solution) -> Solution + 'static> = Box::new(inv_transform);
+            Some(it)
+        } else {
+            None
+        };
+        let max_steps = 15 * (window_size.ilog10() as usize) + 300;
+        let starting_slope = starting_slope.unwrap_or_else(|| {
+            match trivial_solution_or_slope(&points[..window_size]) {
+                Some(TrivialSolutionOrSlope::Slope(starting_slope)) => starting_slope,
+                Some(TrivialSolutionOrSlope::ProblemTrivial(_)) | None => unreachable!(),
+            }
+        });
+        Some(Self {
+            points,
+            window_size,
+            max_steps,
+            starting_slope,
+            current_start: 0,
+            window_points: vec![Default::default(); window_size],
+            line_val_buf: vec![Default::default(); window_size],
+            inv_transform,
+        })
+    }
+}
+
+impl<'a, const NORMALIZE_INPUT: bool> Iterator for WindowedPalb<'a, NORMALIZE_INPUT> {
+    type Item = Solution;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_start + self.window_size > self.points.len() {
+            return None;
+        }
+        // make a solver, then run the solver to completion.
+        self.window_points.clear();
+        self.window_points.extend_from_slice(
+            &self.points[self.current_start..self.current_start + self.window_size],
+        );
+        // update for next iteration
+        self.current_start += 1;
+        let solver = PalbGen::new_with_val_buf(
+            self.starting_slope,
+            &mut self.window_points,
+            &mut self.line_val_buf,
+            Uncertainty::default(),
+            DoubleIntervalSize,
+        )
+        .expect("Created buffer was too small");
+
+        // we now do the same thing as in the non-windowed case
+        let sol = solver
+            .take_until(|obs_state| {
+                (obs_state.options[0].slope - obs_state.options[1].slope).abs()
+                    < Floating::from(1e-15)
+            }) // stop iteration once the interval gets *tiny* (if that ever happens)
+            .take(self.max_steps) // at most this many iterations, then we bail out
+            .last()
+            .map(|obs_state| {
+                (
+                    obs_state
+                        .options
+                        .into_iter()
+                        .min_by_key(|state| {
+                            state.get_or_compute_obj_val_noncached(self.window_points.as_ref())
+                        })
+                        .unwrap(),
+                    obs_state.info,
+                )
+            })
+            .map(|(state, info)| Solution {
+                optimal_line: state.line_estimate,
+                objective_value: state.obj_val.unwrap_or_else(|| {
+                    state.get_or_compute_obj_val_noncached(self.window_points.as_ref())
+                }),
+                info,
+            });
+        match sol {
+            Some(sol) => {
+                self.starting_slope = sol.optimal_line.slope();
+                if let Some(transf) = &self.inv_transform {
+                    Some((transf)(sol))
+                } else {
+                    Some(sol)
+                }
+            }
+            None => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests_bisect {
+
     use crate::l1line;
+    use crate::l1line_with_initial_guess;
     use crate::objective_value;
 
     use super::{Floating, PrimalLine, PrimalPoint};
     use approx::{assert_abs_diff_eq, relative_eq};
     use itertools::Itertools;
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use rand_distr::{Distribution, Normal};
 
     /// Generates `n` random points with x uniformly distributed in [0,1] and
@@ -1017,7 +1311,8 @@ mod tests_bisect {
         let points = generate_random_points(10, 0, ground_truth);
         dbg!(points.iter().map(|p| p.x()).collect_vec());
         dbg!(points.iter().map(|p| p.y()).collect_vec());
-        let res = l1line(&points).unwrap();
+        let mut points2 = points.clone();
+        let res = l1line(&mut points2).unwrap();
         assert_solution_likely_correct(res, ground_truth, &points);
     }
 
@@ -1028,7 +1323,8 @@ mod tests_bisect {
             coords: (Floating::from(-3.0), Floating::from(-2.0)),
         };
         let points = generate_random_points(100, 0, ground_truth);
-        let res = l1line(&points).unwrap();
+        let mut points2 = points.clone();
+        let res = l1line(&mut points2).unwrap();
         assert_solution_likely_correct(res, ground_truth, &points);
     }
 
@@ -1056,7 +1352,8 @@ mod tests_bisect {
             }
             eprintln!("]");
 
-            let res = l1line(&points).unwrap();
+            let mut points2 = points.clone();
+            let res = l1line(&mut points2).unwrap();
             assert_solution_likely_correct(res, ground_truth, &points);
         }
     }
@@ -1078,7 +1375,8 @@ mod tests_bisect {
         }
         eprintln!("]");
 
-        let res = l1line(&points).unwrap();
+        let mut points2 = points.clone();
+        let res = l1line(&mut points2).unwrap();
         eprintln!("res = {:?}", &res);
         assert_solution_likely_correct(res, ground_truth, &points);
     }
@@ -1093,7 +1391,43 @@ mod tests_bisect {
             ),
         };
         let points = generate_random_points(30, 2 + 1, ground_truth);
-        let res = l1line(&points).unwrap();
+        let mut points2 = points.clone();
+        let res = l1line(&mut points2).unwrap();
         assert_solution_likely_correct(res, ground_truth, &points);
+    }
+
+    #[test]
+    fn works_particular3() {
+        let z = Floating::from(0.0);
+        let o = Floating::from(1.0);
+        let points = vec![
+            PrimalPoint::new(-o, z),
+            PrimalPoint::new(o, o + o),
+            PrimalPoint::new(o, -(o + o)),
+        ];
+        let mut points2 = points.clone();
+        for initial_slope in [-o, z, o] {
+            let res =
+                l1line_with_initial_guess::<true>(&mut points2, Some(initial_slope), None).unwrap();
+            println!("res = {:?}", &res.optimal_line.slope());
+            println!("\n");
+        }
+        // panic!()
+    }
+
+    #[test]
+    fn works_particular4() {
+        let z = Floating::from(0.0);
+        let o = Floating::from(1.0);
+        let points = vec![
+            PrimalPoint::new(z, z),
+            PrimalPoint::new(o, z),
+            PrimalPoint::new(Floating::from(1e-12), o),
+        ];
+        let mut points2 = points.clone();
+        let res = l1line(&mut points2).unwrap();
+        println!("res = {:?}", res);
+        // std::hint::black_box(res);
+        // panic!()
     }
 }
