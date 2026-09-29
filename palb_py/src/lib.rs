@@ -73,7 +73,7 @@ fn l1line<'py>(
             )));
         }
     } else {
-        let wrapped_points = arr
+        let mut wrapped_points = arr
             .rows()
             .into_iter()
             .map(|row| palb::PrimalPoint::new(Floating::from(row[0]), Floating::from(row[1])))
@@ -82,7 +82,7 @@ fn l1line<'py>(
             palb::l1line_with_info::<true>
         } else {
             palb::l1line_with_info::<false>
-        })(&wrapped_points)
+        })(&mut wrapped_points)
         .map(|res| RegressionResult::from_solution(&res))
         .ok_or_else(|| PyErr::new::<PyValueError, _>("Failed to compute L1 line"))
     }
@@ -104,7 +104,7 @@ pub fn l1line_xy<'py>(
             "Input arrays must have the same number of elements",
         ));
     }
-    let wrapped_points = x_arr
+    let mut wrapped_points = x_arr
         .into_iter()
         .zip(y_arr.into_iter())
         .map(|(x, y)| palb::PrimalPoint::new(Floating::from(*x), Floating::from(*y)))
@@ -113,7 +113,7 @@ pub fn l1line_xy<'py>(
         palb::l1line_with_info::<true>
     } else {
         palb::l1line_with_info::<false>
-    })(&wrapped_points)
+    })(&mut wrapped_points)
     .map(|res| RegressionResult::from_solution(&res))
     .ok_or_else(|| PyErr::new::<PyValueError, _>("Failed to compute L1 line"))
 }
